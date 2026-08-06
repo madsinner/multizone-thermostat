@@ -53,6 +53,8 @@ from .const import (
     DEFAULT_SEASON,
     DEFAULT_SUMMER_PRESET_TEMPS,
     DEFAULT_WINTER_PRESET_TEMPS,
+    CONF_ZONE_WINDOW_SENSOR,
+    ZONE_MODE_BYPASS,
 )
 from .pwm_engine import PWMEngine
 
@@ -60,7 +62,6 @@ _LOGGER = logging.getLogger(__name__)
 
 # ===== ЛОКАЛЬНАЯ ФУНКЦИЯ =====
 def make_vt_entity_id(name: str) -> str:
-    """Generate entity_id for a virtual thermostat."""
     safe_name = name.lower().replace(" ", "_")
     safe_name = "".join(c for c in safe_name if c.isalnum() or c == "_")
     return f"climate.vt_{safe_name}"
@@ -71,14 +72,10 @@ async def async_setup_entry(
     config_entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up virtual thermostat climate entities from a config entry."""
     virtual_thermostats = config_entry.data.get(CONF_VIRTUAL_THERMOSTATS, [])
     if not virtual_thermostats:
         return
-
-    # Get current season from config
     season = config_entry.data.get(CONF_SEASON, DEFAULT_SEASON)
-
     entities = []
     for vt_config in virtual_thermostats:
         entities.append(
@@ -101,8 +98,6 @@ async def async_setup_entry(
 
 
 class MultizoneVirtualThermostat(RestoreEntity, ClimateEntity):
-    """A virtual thermostat that controls a heater and optionally a cooler switch, with presets and season."""
-
     _attr_has_entity_name = True
     _attr_supported_features = (
         ClimateEntityFeature.TARGET_TEMPERATURE | ClimateEntityFeature.PRESET_MODE
@@ -128,7 +123,6 @@ class MultizoneVirtualThermostat(RestoreEntity, ClimateEntity):
         preset_temps_winter: dict[str, float] = None,
         season: str = DEFAULT_SEASON,
     ) -> None:
-        """Initialize the virtual thermostat."""
         self.hass = hass
         self._name = name
         self._temp_sensor = temp_sensor
@@ -139,12 +133,18 @@ class MultizoneVirtualThermostat(RestoreEntity, ClimateEntity):
         self._preset_temps_summer = preset_temps_summer or DEFAULT_SUMMER_PRESET_TEMPS
         self._preset_temps_winter = preset_temps_winter or DEFAULT_WINTER_PRESET_TEMPS
         self._season = season
-
-        # Choose active preset dict based on current season
         self._preset_temperatures = self._get_active_preset_temps()
+        self._window_open = False
 
-        # State
-        # Set initial hvac mode based on season
+        # Ищем датчик окна для этой зоны
+        self._window_sensor = None
+        coordinator = hass.data[DOMAIN][entry_id]["coordinator"]
+        vt_entity_id = make_vt_entity_id(name)
+        for zone in coordinator.zones:
+            if zone.get("climate_entity") == vt_entity_id:
+                self._window_sensor = zone.get(CONF_ZONE_WINDOW_SENSOR)
+                break
+
         if season == SEASON_WINTER:
             self._hvac_mode = HVACMode.HEAT
         else:
@@ -153,16 +153,11 @@ class MultizoneVirtualThermostat(RestoreEntity, ClimateEntity):
         self._target_temperature = target_temp
         self._current_temperature: float | None = None
         self._preset_mode: str | None = None
-        self._coordinator = hass.data[DOMAIN][entry_id]["coordinator"]
-
-        # PWM Engine for local zone valve (heating only)
+        self._coordinator = coordinator
         self._valve_pwm = PWMEngine(pwm_interval=900.0, min_on=0.0, min_off=0.0)
-
-        # State of switches (cached)
         self._heater_state: bool | None = None
         self._cooler_state: bool | None = None
 
-        # Entity setup
         vt_entity_id = make_vt_entity_id(name)
         safe_name = name.lower().replace(" ", "_")
         safe_name = "".join(c for c in safe_name if c.isalnum() or c == "_")
@@ -174,12 +169,9 @@ class MultizoneVirtualThermostat(RestoreEntity, ClimateEntity):
             model="Virtual Thermostat",
             via_device=(DOMAIN, entry_id),
         )
-        # НЕ устанавливаем entity_id вручную
-
         self._unsub_listeners: list = []
 
     def _get_active_preset_temps(self) -> dict[str, float]:
-        """Return the preset temperatures for the current season."""
         if self._season == SEASON_SUMMER:
             return self._preset_temps_summer
         else:
@@ -187,12 +179,10 @@ class MultizoneVirtualThermostat(RestoreEntity, ClimateEntity):
 
     @property
     def name(self) -> str:
-        """Return the name."""
         return f"VT {self._name}"
 
     @property
     def hvac_modes(self) -> list[HVACMode]:
-        """Return the list of available hvac modes."""
         modes = [HVACMode.OFF, HVACMode.HEAT]
         if self._cooler_switch is not None:
             modes.append(HVACMode.COOL)
@@ -201,15 +191,12 @@ class MultizoneVirtualThermostat(RestoreEntity, ClimateEntity):
 
     @property
     def hvac_mode(self) -> HVACMode:
-        """Return current HVAC mode."""
         return self._hvac_mode
 
     @property
     def hvac_action(self) -> HVACAction:
-        """Return current HVAC action."""
         if self._hvac_mode == HVACMode.OFF:
             return HVACAction.OFF
-
         if self._heater_state:
             return HVACAction.HEATING
         if self._cooler_state:
@@ -218,38 +205,55 @@ class MultizoneVirtualThermostat(RestoreEntity, ClimateEntity):
 
     @property
     def current_temperature(self) -> float | None:
-        """Return the current temperature."""
         return self._current_temperature
 
     @property
     def target_temperature(self) -> float | None:
-        """Return the target temperature."""
         return self._target_temperature
 
     @property
     def preset_mode(self) -> str | None:
-        """Return the current preset mode."""
         return self._preset_mode
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Return extra attributes."""
         attrs = {
             "temperature_sensor": self._temp_sensor,
             "heater_switch": self._heater_switch,
             "tolerance": self._tolerance,
             "virtual_thermostat": True,
             "season": self._season,
+            "window_open": self._window_open,
         }
         if self._cooler_switch is not None:
             attrs["cooler_switch"] = self._cooler_switch
             attrs["cool_tolerance"] = self._cool_tolerance
         if self._preset_mode is not None:
             attrs["preset_mode"] = self._preset_mode
+        if self._window_sensor:
+            attrs["window_sensor"] = self._window_sensor
         return attrs
 
+    def set_window_state(self, is_open: bool) -> None:
+        self._window_open = is_open
+        self.async_write_ha_state()
+        self.hass.async_create_task(self._async_control())
+
+    async def _is_window_open(self) -> bool:
+        """Прямой опрос датчика окна (если он задан)."""
+        if self._window_sensor is None:
+            return self._window_open
+        state = self.hass.states.get(self._window_sensor)
+        if state is None:
+            return self._window_open
+        is_open = state.state == "on"
+        # Обновляем кеш, чтобы синхронизировать
+        if is_open != self._window_open:
+            self._window_open = is_open
+            self.async_write_ha_state()
+        return is_open
+
     async def async_set_hvac_mode(self, hvac_mode: HVACMode) -> None:
-        """Set new target hvac mode."""
         if hvac_mode not in self.hvac_modes:
             raise ValueError(f"Unsupported HVAC mode: {hvac_mode}")
         if hvac_mode == HVACMode.COOL and self._cooler_switch is None:
@@ -259,18 +263,15 @@ class MultizoneVirtualThermostat(RestoreEntity, ClimateEntity):
         await self._async_control()
 
     async def async_set_temperature(self, **kwargs: Any) -> None:
-        """Set target temperature."""
         temperature = kwargs.get(ATTR_TEMPERATURE)
         if temperature is None:
             return
         self._target_temperature = temperature
-        # Manual change clears preset
         self._preset_mode = None
         self.async_write_ha_state()
         await self._async_control()
 
     async def async_set_preset_mode(self, preset_mode: str) -> None:
-        """Set new preset mode and update target temperature."""
         if preset_mode not in self._attr_preset_modes:
             raise ValueError(f"Unsupported preset mode: {preset_mode}")
         if preset_mode not in self._preset_temperatures:
@@ -278,18 +279,13 @@ class MultizoneVirtualThermostat(RestoreEntity, ClimateEntity):
             self._preset_mode = preset_mode
             self.async_write_ha_state()
             return
-
         self._preset_mode = preset_mode
         self._target_temperature = self._preset_temperatures[preset_mode]
-        _LOGGER.debug("VT '%s' preset %s set to %.1f°C", self._name, preset_mode, self._target_temperature)
         self.async_write_ha_state()
         await self._async_control()
 
     async def async_added_to_hass(self) -> None:
-        """Restore state and set up listeners."""
         await super().async_added_to_hass()
-
-        # ===== РЕГИСТРАЦИЯ В КООРДИНАТОРЕ ДЛЯ ГЛОБАЛЬНОГО ПРЕСЕТА =====
         self._coordinator.register_virtual_climate(self)
 
         last_state = await self.async_get_last_state()
@@ -300,14 +296,11 @@ class MultizoneVirtualThermostat(RestoreEntity, ClimateEntity):
                 self._target_temperature = float(last_state.attributes[ATTR_TEMPERATURE])
             if last_state.attributes.get("preset_mode") in self._attr_preset_modes:
                 self._preset_mode = last_state.attributes["preset_mode"]
-            _LOGGER.debug(
-                "VT '%s' restored: mode=%s, target=%s, preset=%s",
-                self._name, self._hvac_mode, self._target_temperature, self._preset_mode,
-            )
+            if last_state.attributes.get("window_open") is not None:
+                self._window_open = last_state.attributes["window_open"]
 
         self._update_current_temp()
 
-        # Listen for temperature sensor changes
         self._unsub_listeners.append(
             async_track_state_change_event(
                 self.hass,
@@ -315,8 +308,6 @@ class MultizoneVirtualThermostat(RestoreEntity, ClimateEntity):
                 self._async_on_temp_changed,
             )
         )
-
-        # Listen for heater switch changes
         self._unsub_listeners.append(
             async_track_state_change_event(
                 self.hass,
@@ -324,8 +315,6 @@ class MultizoneVirtualThermostat(RestoreEntity, ClimateEntity):
                 self._async_on_heater_changed,
             )
         )
-
-        # Listen for cooler switch changes
         if self._cooler_switch is not None:
             self._unsub_listeners.append(
                 async_track_state_change_event(
@@ -334,8 +323,6 @@ class MultizoneVirtualThermostat(RestoreEntity, ClimateEntity):
                     self._async_on_cooler_changed,
                 )
             )
-
-        # Listen for season changes
         season_entity_id = f"select.{DOMAIN}_season"
         self._unsub_listeners.append(
             async_track_state_change_event(
@@ -344,8 +331,6 @@ class MultizoneVirtualThermostat(RestoreEntity, ClimateEntity):
                 self._async_on_season_changed,
             )
         )
-
-        # Periodic PWM tick
         self._unsub_listeners.append(
             async_track_time_interval(
                 self.hass,
@@ -353,34 +338,25 @@ class MultizoneVirtualThermostat(RestoreEntity, ClimateEntity):
                 timedelta(seconds=10)
             )
         )
-
         await self._async_control()
 
     async def async_will_remove_from_hass(self) -> None:
-        """Clean up listeners."""
-        # ===== ОТПИСКА ОТ КООРДИНАТОРА =====
         self._coordinator.unregister_virtual_climate(self)
-
         for unsub in self._unsub_listeners:
             unsub()
         self._unsub_listeners.clear()
 
     @callback
     def _update_current_temp(self) -> None:
-        """Read the temperature sensor and update current temperature."""
         state = self.hass.states.get(self._temp_sensor)
         if state and state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN):
             try:
                 self._current_temperature = float(state.state)
             except (ValueError, TypeError):
-                _LOGGER.warning(
-                    "VT '%s': unable to parse temperature from %s: '%s'",
-                    self._name, self._temp_sensor, state.state,
-                )
+                pass
 
     @callback
     def _async_on_temp_changed(self, event: Event) -> None:
-        """Handle temperature sensor state changes."""
         new_state = event.data.get("new_state")
         if new_state is None or new_state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
             return
@@ -393,7 +369,6 @@ class MultizoneVirtualThermostat(RestoreEntity, ClimateEntity):
 
     @callback
     def _async_on_heater_changed(self, event: Event) -> None:
-        """Handle heater switch state changes."""
         state = self.hass.states.get(self._heater_switch)
         if state is not None:
             self._heater_state = state.state == STATE_ON
@@ -401,7 +376,6 @@ class MultizoneVirtualThermostat(RestoreEntity, ClimateEntity):
 
     @callback
     def _async_on_cooler_changed(self, event: Event) -> None:
-        """Handle cooler switch state changes."""
         if self._cooler_switch is None:
             return
         state = self.hass.states.get(self._cooler_switch)
@@ -411,50 +385,47 @@ class MultizoneVirtualThermostat(RestoreEntity, ClimateEntity):
 
     @callback
     def _async_on_season_changed(self, event: Event) -> None:
-        """Handle season selector state changes."""
         new_state = event.data.get("new_state")
         if new_state is None or new_state.state not in (SEASON_SUMMER, SEASON_WINTER):
             return
         self._season = new_state.state
-        # Update preset temperatures according to new season
         self._preset_temperatures = self._get_active_preset_temps()
-        # If current preset is active, update target temperature
         if self._preset_mode is not None and self._preset_mode in self._preset_temperatures:
             self._target_temperature = self._preset_temperatures[self._preset_mode]
-            _LOGGER.debug("VT '%s' season changed to %s, updated target to %.1f°C",
-                          self._name, self._season, self._target_temperature)
-
-        # Auto-switch HVAC mode based on season
         if self._season == SEASON_WINTER:
-            # Winter: always HEAT (if boiler is available)
             if self._hvac_mode != HVACMode.HEAT:
                 self._hvac_mode = HVACMode.HEAT
-                _LOGGER.debug("VT '%s' auto-switched to HEAT for winter", self._name)
-        else:  # SUMMER
+        else:
             if self._cooler_switch is not None:
-                # If cooler available, switch to COOL
                 if self._hvac_mode != HVACMode.COOL:
                     self._hvac_mode = HVACMode.COOL
-                    _LOGGER.debug("VT '%s' auto-switched to COOL for summer", self._name)
             else:
-                # No cooler, turn off
                 if self._hvac_mode != HVACMode.OFF:
                     self._hvac_mode = HVACMode.OFF
-                    _LOGGER.debug("VT '%s' auto-switched to OFF for summer (no cooler)", self._name)
-
         self.async_write_ha_state()
         self.hass.async_create_task(self._async_control())
 
     async def _async_control(self) -> None:
-        """Main control logic: decide what to turn on/off based on mode."""
         if self._current_temperature is None:
             return
 
+        # ===== ANTI-FROST (глобальный приоритет) =====
+        if self._coordinator.is_anti_frost_enabled():
+            frost_temp = self._coordinator.get_frost_protection_temp()
+            if self._current_temperature < frost_temp:
+                await self._async_set_cooler(False)
+                await self._async_set_heater(True)
+                self._coordinator.set_zone_demand(self.entity_id, 100.0)
+                return
+
+        # ===== НОРМАЛЬНАЯ ЛОГИКА =====
         target = self._target_temperature
         current = self._current_temperature
-
         need_heat = current < target - self._tolerance
         need_cool = current > target + self._cool_tolerance
+
+        # Прямой опрос датчика окна (обновляет кеш)
+        window_open = await self._is_window_open()
 
         if self._hvac_mode == HVACMode.OFF:
             await self._async_set_heater(False)
@@ -462,48 +433,78 @@ class MultizoneVirtualThermostat(RestoreEntity, ClimateEntity):
             self._coordinator.set_zone_demand(self.entity_id, 0.0)
 
         elif self._hvac_mode == HVACMode.HEAT:
-            await self._async_set_cooler(False)
-            if self._coordinator.get_master_state():
-                demand = 100.0 if need_heat else 0.0
-                self._coordinator.set_zone_demand(self.entity_id, demand)
-            else:
-                self._coordinator.set_zone_demand(self.entity_id, 0.0)
+            # Если окно открыто – не включаем нагрев (кроме антифроста, но он уже отработал)
+            if window_open:
                 await self._async_set_heater(False)
-
-        elif self._hvac_mode == HVACMode.COOL:
-            await self._async_set_heater(False)
-            await self._async_set_cooler(need_cool)
-
-        elif self._hvac_mode == HVACMode.HEAT_COOL:
-            if need_heat and not need_cool:
+                await self._async_set_cooler(False)
+                self._coordinator.set_zone_demand(self.entity_id, 0.0)
+            else:
                 await self._async_set_cooler(False)
                 if self._coordinator.get_master_state():
-                    self._coordinator.set_zone_demand(self.entity_id, 100.0)
+                    demand = 100.0 if need_heat else 0.0
+                    self._coordinator.set_zone_demand(self.entity_id, demand)
                 else:
                     self._coordinator.set_zone_demand(self.entity_id, 0.0)
                     await self._async_set_heater(False)
+
+        elif self._hvac_mode == HVACMode.COOL:
+            await self._async_set_heater(False)
+            # Блокируем охлаждение, если окно открыто или зона в Bypass
+            if window_open or self._coordinator.get_zone_mode(self.entity_id) == ZONE_MODE_BYPASS:
+                await self._async_set_cooler(False)
+                self._coordinator.set_zone_demand(self.entity_id, 0.0)
+            else:
+                await self._async_set_cooler(need_cool)
+
+        elif self._hvac_mode == HVACMode.HEAT_COOL:
+            if need_heat and not need_cool:
+                # Блокируем нагрев, если окно открыто
+                if window_open:
+                    await self._async_set_heater(False)
+                    await self._async_set_cooler(False)
+                    self._coordinator.set_zone_demand(self.entity_id, 0.0)
+                else:
+                    await self._async_set_cooler(False)
+                    if self._coordinator.get_master_state():
+                        self._coordinator.set_zone_demand(self.entity_id, 100.0)
+                    else:
+                        self._coordinator.set_zone_demand(self.entity_id, 0.0)
+                        await self._async_set_heater(False)
             elif need_cool and not need_heat:
                 await self._async_set_heater(False)
-                await self._async_set_cooler(True)
-                self._coordinator.set_zone_demand(self.entity_id, 0.0)
+                if window_open or self._coordinator.get_zone_mode(self.entity_id) == ZONE_MODE_BYPASS:
+                    await self._async_set_cooler(False)
+                    self._coordinator.set_zone_demand(self.entity_id, 0.0)
+                else:
+                    await self._async_set_cooler(True)
             else:
                 await self._async_set_heater(False)
                 await self._async_set_cooler(False)
                 self._coordinator.set_zone_demand(self.entity_id, 0.0)
 
     async def _async_pwm_tick(self, now) -> None:
-        """Periodic tick to evaluate PWM state for the zone valve (heating only)."""
+        """PWM tick for heating – также проверяем окно перед включением."""
         if self._hvac_mode != HVACMode.HEAT and self._hvac_mode != HVACMode.HEAT_COOL:
             await self._async_set_heater(False)
             return
-
         if self._hvac_mode == HVACMode.HEAT_COOL and self._cooler_state:
             await self._async_set_heater(False)
             return
-
         if not self._coordinator.get_master_state():
             await self._async_set_heater(False)
             return
+
+        # Проверяем окно перед включением нагрева (PWM)
+        if self._coordinator.is_anti_frost_enabled():
+            frost_temp = self._coordinator.get_frost_protection_temp()
+            if self._current_temperature is not None and self._current_temperature < frost_temp:
+                # Антифрост разрешает включение даже при открытом окне
+                pass
+            else:
+                window_open = await self._is_window_open()
+                if window_open:
+                    await self._async_set_heater(False)
+                    return
 
         demand = self._coordinator.get_zone_demand(self.entity_id)
         if demand is None:
@@ -513,7 +514,6 @@ class MultizoneVirtualThermostat(RestoreEntity, ClimateEntity):
             await self._async_set_heater(wanted_state)
 
     async def _async_set_heater(self, state: bool) -> None:
-        """Set heater switch to on/off."""
         if state == self._heater_state:
             return
         self._heater_state = state
@@ -534,13 +534,22 @@ class MultizoneVirtualThermostat(RestoreEntity, ClimateEntity):
         self.async_write_ha_state()
 
     async def _async_set_cooler(self, state: bool) -> None:
-        """Set cooler switch to on/off с учётом защиты Min Cycle."""
         if self._cooler_switch is None:
             return
+
+        # Блокируем, если окно открыто (кеш + прямой опрос уже сделан, но на всякий случай)
+        if state and self._window_open:
+            _LOGGER.debug("Cooling blocked because window is open in %s", self._name)
+            return
+
+        # Блокируем, если зона в Bypass
+        if state and self._coordinator.get_zone_mode(self.entity_id) == ZONE_MODE_BYPASS:
+            _LOGGER.debug("Cooling blocked because zone is in Bypass mode in %s", self._name)
+            return
+
         if state == self._cooler_state:
             return
 
-        # Проверяем защиту
         if state:
             if not self._coordinator.can_cooler_turn_on():
                 return
@@ -548,7 +557,6 @@ class MultizoneVirtualThermostat(RestoreEntity, ClimateEntity):
             if not self._coordinator.can_cooler_turn_off():
                 return
 
-        # Выполняем действие
         self._cooler_state = state
         if state:
             await self.hass.services.async_call(
