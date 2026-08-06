@@ -107,25 +107,21 @@ SEASONS = [SEASON_SUMMER, SEASON_WINTER]
 DEFAULT_SEASON = SEASON_WINTER
 
 # ===== ПРЕСЕТЫ ДЛЯ ЛЕТА И ЗИМЫ =====
-# Ключи для хранения в VT
 CONF_VT_PRESET_TEMPS_SUMMER = "preset_temperatures_summer"
 CONF_VT_PRESET_TEMPS_WINTER = "preset_temperatures_winter"
 
-# Поля для ввода в config_flow (летние)
 CONF_VT_SUMMER_MANUAL = "summer_manual_temp"
 CONF_VT_SUMMER_ECO = "summer_eco_temp"
 CONF_VT_SUMMER_COMFORT = "summer_comfort_temp"
 CONF_VT_SUMMER_SLEEP = "summer_sleep_temp"
 CONF_VT_SUMMER_AWAY = "summer_away_temp"
 
-# Поля для ввода в config_flow (зимние)
 CONF_VT_WINTER_MANUAL = "winter_manual_temp"
 CONF_VT_WINTER_ECO = "winter_eco_temp"
 CONF_VT_WINTER_COMFORT = "winter_comfort_temp"
 CONF_VT_WINTER_SLEEP = "winter_sleep_temp"
 CONF_VT_WINTER_AWAY = "winter_away_temp"
 
-# Значения по умолчанию
 DEFAULT_SUMMER_PRESET_TEMPS = {
     "manual": 22.0,
     "eco": 20.0,
@@ -140,3 +136,12 @@ DEFAULT_WINTER_PRESET_TEMPS = {
     "sleep": 19.0,
     "away": 16.0,
 }
+
+# ===== АНТИФРОСТ =====
+CONF_ANTI_FROST_ENABLED = "anti_frost_enabled"
+DEFAULT_ANTI_FROST_ENABLED = True
+CONF_FROST_PROTECTION_TEMP = "frost_protection_temp"
+DEFAULT_FROST_PROTECTION_TEMP = 15.0
+
+# Алиас для обратной совместимости с config_flow
+CONF_GLOBAL_FROST_PROTECTION_TEMP = CONF_FROST_PROTECTION_TEMP
