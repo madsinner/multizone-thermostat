@@ -18,6 +18,7 @@ from .const import (
     KEY_GEOFENCING_TOGGLE,
     KEY_AUTO_NIGHT_MODE,
     KEY_ANTI_SEIZE_ENABLED,
+    CONF_ANTI_FROST_ENABLED,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -37,8 +38,6 @@ async def async_setup_entry(
     master_switch = MultizoneMasterSwitch(coordinator, config_entry.entry_id)
     entities.append(master_switch)
 
-    # (Zone switches are now Select entities in select.py)
-
     # Auto Night Mode
     entities.append(MultizoneAutoNightModeSwitch(coordinator, config_entry.entry_id))
 
@@ -48,6 +47,9 @@ async def async_setup_entry(
 
     # Anti-seize Switch
     entities.append(MultizoneAntiSeizeSwitch(coordinator, config_entry.entry_id))
+
+    # Anti-Frost Switch (NEW)
+    entities.append(MultizoneAntiFrostSwitch(coordinator, config_entry.entry_id))
 
     async_add_entities(entities, True)
 
@@ -70,7 +72,6 @@ def _make_device_info(entry_id: str, device_type: str = "main") -> DeviceInfo:
             model="Zone Modes",
             via_device=(DOMAIN, entry_id),
         )
-        
     return DeviceInfo(
         identifiers={(DOMAIN, entry_id)},
         name="Multizone Thermostat",
@@ -129,7 +130,6 @@ class MultizoneMasterSwitch(RestoreEntity, SwitchEntity):
             self._is_on = last_state.state == "on"
             self._coordinator.set_master_state(self._is_on)
             _LOGGER.debug("Master switch restored to: %s", self._is_on)
-
 
 
 class MultizoneAutoNightModeSwitch(SwitchEntity):
@@ -191,6 +191,7 @@ class MultizoneGeofencingSwitch(SwitchEntity):
         await self._coordinator.async_set_persistent_data(KEY_GEOFENCING_TOGGLE, False)
         self.async_write_ha_state()
 
+
 class MultizoneAntiSeizeSwitch(SwitchEntity):
     """Switch to dynamically enable/disable Anti-Seize (Summer Protection)."""
 
@@ -220,3 +221,33 @@ class MultizoneAntiSeizeSwitch(SwitchEntity):
         await self._coordinator.async_set_persistent_data(KEY_ANTI_SEIZE_ENABLED, False)
         self.async_write_ha_state()
 
+
+# ===== NEW: Anti-Frost Switch =====
+class MultizoneAntiFrostSwitch(SwitchEntity):
+    """Switch to enable/disable Anti-Frost protection."""
+
+    _attr_has_entity_name = True
+    _attr_name = "Anti-Frost Protection"
+    _attr_icon = "mdi:snowflake-alert"
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, coordinator: Any, entry_id: str) -> None:
+        """Initialize switch."""
+        self._coordinator = coordinator
+        self._attr_unique_id = f"{DOMAIN}_{entry_id}_anti_frost"
+        self._attr_device_info = _make_device_info(entry_id)
+
+    @property
+    def is_on(self) -> bool:
+        """Return true if anti-frost is enabled."""
+        return self._coordinator.is_anti_frost_enabled()
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        """Enable anti-frost."""
+        await self._coordinator.async_set_anti_frost_enabled(True)
+        self.async_write_ha_state()
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        """Disable anti-frost."""
+        await self._coordinator.async_set_anti_frost_enabled(False)
+        self.async_write_ha_state()
