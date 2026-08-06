@@ -123,18 +123,18 @@ CONF_VT_WINTER_SLEEP = "winter_sleep_temp"
 CONF_VT_WINTER_AWAY = "winter_away_temp"
 
 DEFAULT_SUMMER_PRESET_TEMPS = {
-    "manual": 22.0,
-    "eco": 20.0,
-    "comfort": 24.0,
-    "sleep": 21.0,
-    "away": 18.0,
+    "manual": 25.0,
+    "eco": 27.0,
+    "comfort": 25.0,
+    "sleep": 26.0,
+    "away": 30.0,
 }
 DEFAULT_WINTER_PRESET_TEMPS = {
-    "manual": 20.0,
-    "eco": 18.0,
-    "comfort": 22.0,
-    "sleep": 19.0,
-    "away": 16.0,
+    "manual": 25.0,
+    "eco": 20.0,
+    "comfort": 25.0,
+    "sleep": 24.0,
+    "away": 22.0,
 }
 
 # ===== АНТИФРОСТ =====
