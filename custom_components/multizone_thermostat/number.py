@@ -31,6 +31,8 @@ from .const import (
     GLOBAL_PRESETS,
     DEFAULT_SUMMER_PRESET_TEMPS,
     DEFAULT_WINTER_PRESET_TEMPS,
+    CONF_FROST_PROTECTION_TEMP,
+    DEFAULT_FROST_PROTECTION_TEMP,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -134,6 +136,12 @@ async def async_setup_entry(
             default_val=0.0,
             device_info=device_info,
         ),
+        # NEW: Frost protection temperature
+        MultizoneFrostProtectionNumber(
+            coordinator=coordinator,
+            entry_id=config_entry.entry_id,
+            device_info=device_info,
+        ),
     ]
 
     # Add preset temperature numbers for each virtual thermostat
@@ -141,12 +149,10 @@ async def async_setup_entry(
     for vt_config in virtual_thermostats:
         vt_name = vt_config[CONF_VT_NAME]
         safe_vt = vt_name.lower().replace(" ", "_").replace("-", "_")
-        # Очищаем от недопустимых символов
         safe_vt = "".join(c for c in safe_vt if c.isalnum() or c == "_")
         summer_temps = vt_config.get(CONF_VT_PRESET_TEMPS_SUMMER, DEFAULT_SUMMER_PRESET_TEMPS)
         winter_temps = vt_config.get(CONF_VT_PRESET_TEMPS_WINTER, DEFAULT_WINTER_PRESET_TEMPS)
-        
-        # Уникальное устройство для этого VT
+
         vt_device_info = DeviceInfo(
             identifiers={(DOMAIN, f"{config_entry.entry_id}_vt_{safe_vt}")},
             name=f"{vt_name} Thermostat",
@@ -154,8 +160,7 @@ async def async_setup_entry(
             model="Virtual Thermostat",
             via_device=(DOMAIN, config_entry.entry_id),
         )
-        
-        # Сначала добавляем все летние пресеты
+
         for preset in GLOBAL_PRESETS:
             entities.append(
                 PresetNumber(
@@ -168,7 +173,6 @@ async def async_setup_entry(
                     vt_device_info,
                 )
             )
-        # Затем все зимние пресеты
         for preset in GLOBAL_PRESETS:
             entities.append(
                 PresetNumber(
@@ -327,11 +331,9 @@ class PresetNumber(RestoreEntity, NumberEntity):
         safe_vt = vt_name.lower().replace(" ", "_").replace("-", "_")
         safe_vt = "".join(c for c in safe_vt if c.isalnum() or c == "_")
         self._attr_unique_id = f"{DOMAIN}_{entry_id}_vt_{safe_vt}_{season}_{preset}_temp"
-        # НЕ устанавливаем entity_id вручную!
 
         self._attr_device_info = device_info
 
-        # Имена на русском
         season_name = "Лето" if season == SEASON_SUMMER else "Зима"
         preset_names = {
             "manual": "Ручной",
@@ -344,15 +346,12 @@ class PresetNumber(RestoreEntity, NumberEntity):
 
     @property
     def available(self) -> bool:
-        """Return if entity is available."""
         return True
 
     async def async_set_native_value(self, value: float) -> None:
-        """Update the preset temperature."""
         self._attr_native_value = value
         self.async_write_ha_state()
 
-        # Update the config entry data
         entry = self.hass.config_entries.async_get_entry(self._entry_id)
         if not entry:
             return
@@ -372,7 +371,35 @@ class PresetNumber(RestoreEntity, NumberEntity):
 
         data[CONF_VIRTUAL_THERMOSTATS] = virtual_thermostats
         self.hass.config_entries.async_update_entry(entry, data=data)
-
-        # Reload the entry to apply changes to the climate entities
         await self.hass.config_entries.async_reload(self._entry_id)
-        _LOGGER.debug("Updated %s preset %s temp to %.1f", self._vt_name, self._preset, value)
+
+
+class MultizoneFrostProtectionNumber(RestoreNumber):
+    """Number entity for frost protection temperature threshold."""
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.CONFIG
+    _attr_icon = "mdi:thermometer-alert"
+    _attr_native_min_value = 5.0
+    _attr_native_max_value = 30.0
+    _attr_native_step = 0.5
+
+    def __init__(
+        self,
+        coordinator: Any,
+        entry_id: str,
+        device_info: DeviceInfo,
+    ) -> None:
+        """Initialize the frost protection temperature number."""
+        self._coordinator = coordinator
+        self._entry_id = entry_id
+        self._attr_unique_id = f"{DOMAIN}_{entry_id}_frost_protection_temp"
+        self._attr_device_info = device_info
+        self._attr_name = "Frost Protection Temperature"
+        self._attr_native_unit_of_measurement = "°C"
+        self._attr_native_value = self._coordinator.get_frost_protection_temp()
+
+    async def async_set_native_value(self, value: float) -> None:
+        self._attr_native_value = value
+        await self._coordinator.async_set_frost_protection_temp(value)
+        self.async_write_ha_state()
